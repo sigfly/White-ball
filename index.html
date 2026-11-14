@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>Tilt Ball — Gravity & Inertia</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;touch-action:none}canvas{display:block;width:100vw;height:100dvh;background:#000}#permission{position:fixed;left:50%;bottom:calc(28px + env(safe-area-inset-bottom));transform:translateX(-50%);background:#fff;color:#000;border:0;border-radius:999px;padding:14px 22px;font:600 15px system-ui;white-space:nowrap}#message{position:fixed;top:calc(18px + env(safe-area-inset-top));left:16px;right:16px;color:#aaa;text-align:center;font:13px system-ui;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="message">Tap Enable sensors, then tilt or shake your phone</div>
+<button id="permission">Enable sensors</button>
+<script>
+(()=>{
+'use strict';
+const canvas=document.getElementById('scene'),ctx=canvas.getContext('2d');
+const button=document.getElementById('permission'),message=document.getElementById('message');
+let W=0,H=0,R=0,x=0,y=0,vx=0,vy=0;
+let gravX=0,gravY=0,shakeX=0,shakeY=0;
+let lastTime=0,lastSensorTime=0,haveMotion=false,haveOrientation=false;
+const G=1850,RESTITUTION=.82,DRAG=.48,ROLLING=135,MAX_ACCEL=10000;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function resize(){
+ const oldW=W,oldH=H;W=innerWidth;H=innerHeight;R=W/16;
+ const dpr=Math.min(devicePixelRatio||1,3);
+ canvas.width=Math.round(W*dpr);canvas.height=Math.round(H*dpr);
+ ctx.setTransform(dpr,0,0,dpr,0,0);
+ if(!oldW){x=W/2;y=H/2}else{x=clamp(x*W/oldW,R,W-R);y=clamp(y*H/oldH,R,H-R)}
+}
+addEventListener('resize',resize);resize();
+function rotateToScreen(a,b){
+ const angle=((screen.orientation&&typeof screen.orientation.angle==='number')?screen.orientation.angle:(typeof window.orientation==='number'?window.orientation:0));
+ switch((angle%360+360)%360){case 90:return {x:-b,y:a};case 180:return{x:-a,y:-b};case 270:return{x:b,y:-a};default:return{x:a,y:b}}
+}
+function orientation(e){
+ if(e.beta==null||e.gamma==null)return;
+ haveOrientation=true;
+ const b=e.beta*Math.PI/180,g=e.gamma*Math.PI/180;
+ // Gravity projected onto the plane of the display. Portrait vertical => down.
+ const p=rotateToScreen(Math.sin(g),Math.sin(b)*Math.cos(g));
+ gravX=clamp(p.x,-1,1)*G;gravY=clamp(p.y,-1,1)*G;
+}
+function motion(e){
+ // acceleration excludes gravity: screen movement produces an opposite inertial force.
+ const a=e.acceleration;
+ if(!a||a.x==null||a.y==null)return;
+ haveMotion=true;lastSensorTime=performance.now();
+ // DeviceMotion x/y are device axes; portrait positive y points toward top.
+ const p=rotateToScreen(a.x,-a.y);
+ const targetX=clamp(-p.x*185,-MAX_ACCEL,MAX_ACCEL);
+ const targetY=clamp(-p.y*185,-MAX_ACCEL,MAX_ACCEL);
+ // Smooth sensor noise but retain short sharp impulses from shaking.
+ shakeX=shakeX*.32+targetX*.68;
+ shakeY=shakeY*.32+targetY*.68;
+}
+async function enable(){
+ try{
+  if(typeof DeviceMotionEvent!=='undefined'&&typeof DeviceMotionEvent.requestPermission==='function'){
+   const result=await DeviceMotionEvent.requestPermission();if(result!=='granted')throw Error('Motion permission denied');
+  }
+  if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function'){
+   const result=await DeviceOrientationEvent.requestPermission();if(result!=='granted')throw Error('Orientation permission denied');
+  }
+  addEventListener('deviceorientation',orientation,true);
+  addEventListener('devicemotion',motion,true);
+  button.hidden=true;message.textContent='';
+  setTimeout(()=>{if(!haveMotion&&!haveOrientation)message.textContent='Motion sensors unavailable. Open over HTTPS on a phone.'},1800);
+ }catch(err){message.textContent=err.message||'Unable to access sensors'}
+}
+button.addEventListener('click',enable);
+// Desktop test: drag to simulate a quick phone translation, release to stop.
+let pointer=null,lastPX=0,lastPY=0,lastPT=0;
+canvas.addEventListener('pointerdown',e=>{pointer=e.pointerId;lastPX=e.clientX;lastPY=e.clientY;lastPT=performance.now();canvas.setPointerCapture(pointer)});
+canvas.addEventListener('pointermove',e=>{if(pointer!==e.pointerId||haveMotion)return;const now=performance.now(),dt=Math.max(.008,(now-lastPT)/1000);shakeX=clamp(-(e.clientX-lastPX)/dt*9,-MAX_ACCEL,MAX_ACCEL);shakeY=clamp(-(e.clientY-lastPY)/dt*9,-MAX_ACCEL,MAX_ACCEL);lastPX=e.clientX;lastPY=e.clientY;lastPT=now});
+canvas.addEventListener('pointerup',()=>{pointer=null});
+function frame(now){
+ let dt=lastTime?Math.min((now-lastTime)/1000,.04):1/60;lastTime=now;
+ if(haveMotion&&now-lastSensorTime>250){shakeX*=.85;shakeY*=.85}
+ if(!haveMotion&&pointer===null){shakeX*=.87;shakeY*=.87}
+ const n=Math.max(1,Math.ceil(dt/(1/180))),h=dt/n;
+ for(let i=0;i<n;i++){
+  const ax=gravX+shakeX,ay=gravY+shakeY;
+  vx+=ax*h;vy+=ay*h;
+  const damp=Math.exp(-DRAG*h);vx*=damp;vy*=damp;
+  // Rolling resistance slows motion when forces are weak.
+  const speed=Math.hypot(vx,vy);
+  if(speed>0){const slow=Math.min(speed,ROLLING*h);vx-=vx/speed*slow;vy-=vy/speed*slow}
+  x+=vx*h;y+=vy*h;
+  if(x<R){x=R;vx=vx<0?-vx*RESTITUTION:vx;vy*=.985}
+  if(x>W-R){x=W-R;vx=vx>0?-vx*RESTITUTION:vx;vy*=.985}
+  if(y<R){y=R;vy=vy<0?-vy*RESTITUTION:vy;vx*=.985}
+  if(y>H-R){y=H-R;vy=vy>0?-vy*RESTITUTION:vy;vx*=.985}
+  // Prevent jitter at a resting edge, while preserving shake impulses.
+  if(y>=H-R-.01&&Math.abs(vy)<30&&ay>0)vy=0;
+  if(y<=R+.01&&Math.abs(vy)<30&&ay<0)vy=0;
+  if(x>=W-R-.01&&Math.abs(vx)<30&&ax>0)vx=0;
+  if(x<=R+.01&&Math.abs(vx)<30&&ax<0)vx=0;
+ }
+ ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
+ ctx.beginPath();ctx.arc(x,y,R,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();
+ requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
